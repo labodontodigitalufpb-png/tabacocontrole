@@ -19,6 +19,14 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - name: Guard repo target
+        run: |
+          if [ "${{ github.repository }}" != "labodontodigitalufpb-png/tabacocontrole" ]; then
+            echo "Este workflow e exclusivo do repositorio labodontodigitalufpb-png/tabacocontrole."
+            echo "Repositorio atual: ${{ github.repository }}"
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@v4
 
