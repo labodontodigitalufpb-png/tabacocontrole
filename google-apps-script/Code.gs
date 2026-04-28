@@ -5,7 +5,16 @@ const CONFIG = {
   timezone: "America/Fortaleza",
 };
 
-const SCRIPT_SCHEMA_VERSION = "2026-04-20-tabaco-controle-v4";
+const SCRIPT_SCHEMA_VERSION = "2026-04-28-tabaco-controle-v6";
+
+const METADATA_HEADERS = [
+  "envioId",
+  "recebidoEm",
+  "origem",
+  "timestampEnvio",
+  "schemaVersion",
+  "indiceCaso",
+];
 
 const CASE_KEY_ORDER = [
   "id",
@@ -19,6 +28,7 @@ const CASE_KEY_ORDER = [
   "ocupacao",
   "municipio",
   "estado",
+  "pais",
   "ine",
   "tipoEquipe",
   "profissionalResponsavel",
@@ -119,16 +129,16 @@ const CASE_HEADER_LABELS = {
   identificacao: "Nome do usuário",
   racaCor: "Raça/cor",
   ine: "INE",
-  q1: "Q1",
-  q2: "Q2",
-  q3: "Q3",
-  q4: "Q4",
-  q5: "Q5",
-  q6: "Q6",
-  q7: "Q7",
-  q8: "Q8",
-  q9: "Q9",
-  q10: "Q10",
+  q1: "AUDIT Q1",
+  q2: "AUDIT Q2",
+  q3: "AUDIT Q3",
+  q4: "AUDIT Q4",
+  q5: "AUDIT Q5",
+  q6: "AUDIT Q6",
+  q7: "AUDIT Q7",
+  q8: "AUDIT Q8",
+  q9: "AUDIT Q9",
+  q10: "AUDIT Q10",
   upenn_q1: "UPenn Q1",
   upenn_q2: "UPenn Q2",
   upenn_q3: "UPenn Q3",
@@ -141,10 +151,15 @@ const CASE_HEADER_LABELS = {
   upenn_q10: "UPenn Q10",
 };
 
+const HEADER_TO_CASE_KEY = Object.keys(CASE_HEADER_LABELS).reduce((acc, key) => {
+  acc[CASE_HEADER_LABELS[key]] = key;
+  return acc;
+}, {});
+
 function doGet() {
   return jsonOutput_({
     sucesso: true,
-    mensagem: "Tabaco Controle Apps Script ativo",
+    mensagem: "Tabaco Controle Apps Script ativo.",
     schemaVersion: SCRIPT_SCHEMA_VERSION,
     spreadsheetId: CONFIG.spreadsheetId,
     casosSheetName: CONFIG.casosSheetName,
@@ -155,14 +170,18 @@ function doGet() {
 }
 
 function doPost(e) {
+  const lock = LockService.getScriptLock();
+
   try {
+    lock.waitLock(20000);
+
     const payload = parsePayload_(e);
     const spreadsheet = getSpreadsheet_();
     const envioId = Utilities.getUuid();
-    const momento = new Date();
+    const recebidoEm = new Date();
 
-    appendResumoEnvio_(spreadsheet, payload, envioId, momento);
-    appendCasos_(spreadsheet, payload, envioId, momento);
+    appendResumoEnvio_(spreadsheet, payload, envioId, recebidoEm);
+    const quantidadeCasos = appendCasos_(spreadsheet, payload, envioId, recebidoEm);
 
     return jsonOutput_({
       sucesso: true,
@@ -170,21 +189,39 @@ function doPost(e) {
       schemaVersion: SCRIPT_SCHEMA_VERSION,
       envioId: envioId,
       planilhaId: spreadsheet.getId(),
-      quantidadeCasos: Array.isArray(payload.casos) ? payload.casos.length : 0,
+      quantidadeCasos: quantidadeCasos,
     });
   } catch (error) {
     console.error(error);
     return jsonOutput_({
       sucesso: false,
       mensagem: error && error.message ? error.message : "Falha ao registrar dados.",
+      schemaVersion: SCRIPT_SCHEMA_VERSION,
     });
+  } finally {
+    try {
+      lock.releaseLock();
+    } catch (_error) {
+      // O lock pode não ter sido obtido se o erro ocorreu antes do waitLock.
+    }
   }
 }
 
+function setupPlanilha() {
+  const spreadsheet = getSpreadsheet_();
+  ensureSheet_(spreadsheet, CONFIG.enviosSheetName, getResumoHeaders_());
+  ensureSheet_(spreadsheet, CONFIG.casosSheetName, METADATA_HEADERS);
+
+  return {
+    sucesso: true,
+    mensagem: "Abas verificadas/criadas com sucesso.",
+    spreadsheetId: spreadsheet.getId(),
+    schemaVersion: SCRIPT_SCHEMA_VERSION,
+  };
+}
+
 function parsePayload_(e) {
-  const rawPayload =
-    (e && e.parameter && e.parameter.payload) ||
-    (e && e.postData && e.postData.contents);
+  const rawPayload = extractRawPayload_(e);
 
   if (!rawPayload) {
     throw new Error("Payload ausente.");
@@ -194,7 +231,7 @@ function parsePayload_(e) {
   try {
     parsed = JSON.parse(rawPayload);
   } catch (_error) {
-    throw new Error("Payload JSON invalido.");
+    throw new Error("Payload JSON inválido.");
   }
 
   if (!parsed || !Array.isArray(parsed.casos)) {
@@ -204,6 +241,30 @@ function parsePayload_(e) {
   return parsed;
 }
 
+function extractRawPayload_(e) {
+  if (e && e.parameter && e.parameter.payload) {
+    return e.parameter.payload;
+  }
+
+  const rawBody = e && e.postData && e.postData.contents ? e.postData.contents : "";
+  if (!rawBody) return "";
+
+  const trimmed = String(rawBody).trim();
+  if (trimmed.charAt(0) === "{" || trimmed.charAt(0) === "[") {
+    return trimmed;
+  }
+
+  const parts = trimmed.split("&");
+  for (let i = 0; i < parts.length; i += 1) {
+    const pair = parts[i].split("=");
+    if (decodeURIComponent(pair[0] || "") === "payload") {
+      return decodeURIComponent((pair.slice(1).join("=") || "").replace(/\+/g, " "));
+    }
+  }
+
+  return trimmed;
+}
+
 function getSpreadsheet_() {
   if (!CONFIG.spreadsheetId || String(CONFIG.spreadsheetId).indexOf("PREENCHA_") === 0) {
     throw new Error("Configure o spreadsheetId no arquivo Code.gs.");
@@ -211,20 +272,11 @@ function getSpreadsheet_() {
   return SpreadsheetApp.openById(CONFIG.spreadsheetId);
 }
 
-function appendResumoEnvio_(spreadsheet, payload, envioId, momento) {
-  const headers = [
-    "envioId",
-    "recebidoEm",
-    "origem",
-    "timestampEnvio",
-    "quantidadeCasosInformada",
-    "quantidadeCasosRecebida",
-    "schemaVersion",
-  ];
-
+function appendResumoEnvio_(spreadsheet, payload, envioId, recebidoEm) {
+  const headers = getResumoHeaders_();
   const row = [
     envioId,
-    formatDate_(momento),
+    formatDate_(recebidoEm),
     sanitizeValue_(payload.origem),
     sanitizeValue_(payload.timestampEnvio),
     Number(payload.quantidadeCasos || 0),
@@ -236,43 +288,56 @@ function appendResumoEnvio_(spreadsheet, payload, envioId, momento) {
   sheet.appendRow(row);
 }
 
-function appendCasos_(spreadsheet, payload, envioId, momento) {
+function appendCasos_(spreadsheet, payload, envioId, recebidoEm) {
   const cases = Array.isArray(payload.casos) ? payload.casos : [];
-  if (cases.length === 0) return;
+  if (cases.length === 0) return 0;
 
-  const metadataHeaders = [
+  const caseKeys = orderCaseKeys_(collectCaseKeys_(cases));
+  const desiredHeaders = METADATA_HEADERS.concat(caseKeys.map((key) => headerForKey_(key)));
+  const sheet = ensureSheet_(spreadsheet, CONFIG.casosSheetName, desiredHeaders);
+  const finalHeaders = syncHeaders_(sheet, desiredHeaders);
+
+  const rows = cases.map((item, index) =>
+    finalHeaders.map((header) =>
+      valueForCaseHeader_(header, item, payload, envioId, recebidoEm, index)
+    )
+  );
+
+  sheet
+    .getRange(sheet.getLastRow() + 1, 1, rows.length, finalHeaders.length)
+    .setValues(rows);
+
+  return cases.length;
+}
+
+function valueForCaseHeader_(header, item, payload, envioId, recebidoEm, index) {
+  const metadata = {
+    envioId: envioId,
+    recebidoEm: formatDate_(recebidoEm),
+    origem: sanitizeValue_(payload.origem),
+    timestampEnvio: sanitizeValue_(payload.timestampEnvio),
+    schemaVersion: SCRIPT_SCHEMA_VERSION,
+    indiceCaso: index + 1,
+  };
+
+  if (Object.prototype.hasOwnProperty.call(metadata, header)) {
+    return metadata[header];
+  }
+
+  const caseKey = HEADER_TO_CASE_KEY[header] || header;
+  return sanitizeValue_(item ? item[caseKey] : "");
+}
+
+function getResumoHeaders_() {
+  return [
     "envioId",
     "recebidoEm",
     "origem",
     "timestampEnvio",
+    "quantidadeCasosInformada",
+    "quantidadeCasosRecebida",
     "schemaVersion",
-    "indiceCaso",
   ];
-
-  const dynamicKeys = collectCaseKeys_(cases);
-  const orderedKeys = orderCaseKeys_(dynamicKeys);
-  const dynamicHeaders = orderedKeys.map((key) => headerForKey_(key));
-  const headers = metadataHeaders.concat(dynamicHeaders);
-
-  const sheet = ensureSheet_(spreadsheet, CONFIG.casosSheetName, headers);
-  syncHeaders_(sheet, headers);
-
-  const rows = cases.map((item, index) => {
-    const metadataValues = [
-      envioId,
-      formatDate_(momento),
-      sanitizeValue_(payload.origem),
-      sanitizeValue_(payload.timestampEnvio),
-      SCRIPT_SCHEMA_VERSION,
-      index + 1,
-    ];
-
-    const caseValues = orderedKeys.map((key) => sanitizeValue_(item[key]));
-    return metadataValues.concat(caseValues);
-  });
-
-  const startRow = sheet.getLastRow() + 1;
-  sheet.getRange(startRow, 1, rows.length, headers.length).setValues(rows);
 }
 
 function ensureSheet_(spreadsheet, sheetName, headers) {
@@ -282,24 +347,26 @@ function ensureSheet_(spreadsheet, sheetName, headers) {
   if (sheet.getLastRow() === 0) {
     sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
     styleHeader_(sheet, headers.length);
-  } else {
-    syncHeaders_(sheet, headers);
+    return sheet;
   }
 
+  syncHeaders_(sheet, headers);
   return sheet;
 }
 
-function syncHeaders_(sheet, headers) {
-  const currentHeaderCount = Math.max(sheet.getLastColumn(), headers.length, 1);
+function syncHeaders_(sheet, desiredHeaders) {
+  const width = Math.max(sheet.getLastColumn(), desiredHeaders.length, 1);
   const currentHeaders =
-    sheet.getLastRow() > 0
-      ? sheet.getRange(1, 1, 1, currentHeaderCount).getValues()[0]
-      : [];
+    sheet.getLastRow() > 0 ? sheet.getRange(1, 1, 1, width).getValues()[0] : [];
 
-  if (headersEqual_(currentHeaders, headers)) return;
+  const finalHeaders = currentHeaders.filter((header) => String(header || "").trim() !== "");
+  desiredHeaders.forEach((header) => {
+    if (finalHeaders.indexOf(header) === -1) finalHeaders.push(header);
+  });
 
-  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
-  styleHeader_(sheet, headers.length);
+  sheet.getRange(1, 1, 1, finalHeaders.length).setValues([finalHeaders]);
+  styleHeader_(sheet, finalHeaders.length);
+  return finalHeaders;
 }
 
 function styleHeader_(sheet, columnCount) {
@@ -323,7 +390,6 @@ function collectCaseKeys_(cases) {
 
 function orderCaseKeys_(keys) {
   const list = Array.isArray(keys) ? keys : [];
-
   const known = CASE_KEY_ORDER.filter((key) => list.indexOf(key) !== -1);
   const remaining = list.filter((key) => CASE_KEY_ORDER.indexOf(key) === -1).sort();
   return known.concat(remaining);
@@ -331,17 +397,6 @@ function orderCaseKeys_(keys) {
 
 function headerForKey_(key) {
   return CASE_HEADER_LABELS[key] || key;
-}
-
-function headersEqual_(currentHeaders, targetHeaders) {
-  if (!Array.isArray(currentHeaders)) return false;
-  if (currentHeaders.length < targetHeaders.length) return false;
-
-  for (let i = 0; i < targetHeaders.length; i += 1) {
-    if ((currentHeaders[i] || "") !== targetHeaders[i]) return false;
-  }
-
-  return true;
 }
 
 function sanitizeValue_(value) {
