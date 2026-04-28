@@ -19,7 +19,12 @@ const MAX_SCORE_TOTAL =
   MAX_SCORE_UPENN +
   MAX_SCORE_ELETRONICO;
 
-const GOOGLE_SCRIPT_URL = (import.meta.env.VITE_GOOGLE_SCRIPT_URL || "").trim();
+const DEFAULT_GOOGLE_SCRIPT_URL =
+  "https://script.google.com/macros/s/AKfycbz5Ef8C8Hdb5v7AuHYb76P1tCsylwrdw7QV0Kkr4tAkAxCawSYC-D13eWCea3nO_OcloQ/exec";
+const GOOGLE_SCRIPT_URL = (
+  import.meta.env.VITE_GOOGLE_SCRIPT_URL || DEFAULT_GOOGLE_SCRIPT_URL
+).trim();
+const APP_DEPLOY_VERSION = "2026-04-28-script-url-fallback";
 const GOOGLE_SCRIPT_NOT_CONFIGURED_MESSAGE =
   "Configure a URL do Apps Script do laboratório para habilitar o envio ao Google Sheets.";
 
@@ -1369,7 +1374,7 @@ export default function App() {
   };
 
   return (
-    <div className="container">
+    <div className="container" data-app-version={APP_DEPLOY_VERSION}>
       <header className="hero">
         <div className="hero-brand">
           <img
