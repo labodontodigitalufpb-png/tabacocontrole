@@ -40,6 +40,8 @@ jobs:
         run: npm ci
 
       - name: Build
+        env:
+          VITE_GOOGLE_SCRIPT_URL: https://script.google.com/macros/s/AKfycbz5Ef8C8Hdb5v7AuHYb76P1tCsylwrdw7QV0Kkr4tAkAxCawSYC-D13eWCea3nO_OcloQ/exec
         run: npm run build:ghpages
 
       - name: SPA fallback
